@@ -75,9 +75,21 @@ async fn node_worker(
         }
 
         let target_cache = cache_configs.get(&target).cloned();
+        let target_platforms = {
+            let q = dag.queue.lock().unwrap_or_else(|p| p.into_inner());
+            q.target_platforms(&target).to_vec()
+        };
         let start = std::time::Instant::now();
-        let result =
-            execute_bake(&node.shard_builder, &config, &target, target_cache.as_ref()).await;
+        let result = execute_bake(
+            &node.shard_builder,
+            &config,
+            &target,
+            target_cache.as_ref(),
+            &target_platforms,
+            Some(state.clone()),
+            target.clone(),
+        )
+        .await;
         let elapsed = start.elapsed();
 
         {

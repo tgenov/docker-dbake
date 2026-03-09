@@ -104,7 +104,6 @@ impl Dashboard {
                             },
                             View::Log { scroll, .. } => match key.code {
                                 KeyCode::Esc | KeyCode::Char('q') => {
-                                    // Return cursor to the position of this target
                                     self.view = View::Overview { cursor: 0 };
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => {
@@ -114,11 +113,9 @@ impl Dashboard {
                                     *scroll = scroll.saturating_sub(1);
                                 }
                                 KeyCode::Char('g') | KeyCode::Home => {
-                                    // Scroll to very top (show beginning of file)
                                     *scroll = usize::MAX;
                                 }
                                 KeyCode::Char('G') | KeyCode::End => {
-                                    // Scroll to bottom (latest output)
                                     *scroll = 0;
                                 }
                                 _ => {}
@@ -160,7 +157,6 @@ impl Dashboard {
         }
 
         let total = all_lines.len();
-        // scroll=0 means show the tail, scroll>0 means offset from bottom
         let end = total.saturating_sub(scroll);
         let start = end.saturating_sub(height);
         all_lines[start..end].to_vec()
@@ -197,17 +193,20 @@ impl Dashboard {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // Header
-                Constraint::Min(4),    // Node sections
-                Constraint::Length(3), // Queue
+                Constraint::Min(3),    // Active builds
+                Constraint::Length(3), // Queue / idle
                 Constraint::Length(3), // Footer
             ])
             .split(area);
 
         // Header
+        let elapsed = s.elapsed();
         let header = format!(
-            "docker dbake — {} nodes, {} targets",
+            "docker dbake \u{2014} {} nodes, {} targets | {}m {:02}s",
             s.node_names.len(),
             s.total,
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60,
         );
         let header_widget = Paragraph::new(header).style(Style::default().fg(Color::Cyan).bold());
         frame.render_widget(header_widget, chunks[0]);
@@ -215,135 +214,180 @@ impl Dashboard {
         // Build flat list of selectable targets for cursor highlighting
         let selectable: Vec<String> = s.active_targets().iter().map(|s| s.to_string()).collect();
 
-        // Node sections
-        let node_constraints: Vec<Constraint> =
-            s.node_names.iter().map(|_| Constraint::Min(3)).collect();
-        let node_areas = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(node_constraints)
-            .split(chunks[1]);
+        // Active builds — one line per non-pending target
+        let mut lines = Vec::new();
+        let bar_width = 10;
 
-        for (i, node_name) in s.node_names.iter().enumerate() {
-            if i >= node_areas.len() {
-                break;
-            }
+        for node_name in &s.node_names {
             let targets = s.targets_for_node(node_name);
-            let done_count = targets
-                .iter()
-                .filter(|t| matches!(t.status, TargetStatus::Done(_)))
-                .count();
-            let total_assigned = targets.len();
-
-            let mut lines = Vec::new();
-
-            let progress = if total_assigned > 0 {
-                let pct = done_count as f64 / total_assigned as f64;
-                let bar_width = 10;
-                let filled = (pct * bar_width as f64) as usize;
-                let empty = bar_width - filled;
-                format!(
-                    " {} {}/{}",
-                    "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty),
-                    done_count,
-                    total_assigned
-                )
-            } else {
-                let pending = s.count_pending();
-                if pending > 0 {
-                    format!(" idle \u{2014} {} targets waiting on dependencies", pending)
-                } else {
-                    " idle".to_string()
-                }
-            };
-
-            let header_line = Line::from(vec![
-                Span::styled(
-                    format!(" {}", node_name),
-                    Style::default().fg(Color::Yellow).bold(),
-                ),
-                Span::raw(progress),
-            ]);
-            lines.push(header_line);
-
             for target in &targets {
-                let (symbol, style, detail) = match &target.status {
-                    TargetStatus::Done(dur) => (
-                        "\u{2713}",
-                        Style::default().fg(Color::Green),
-                        format!("{}s", dur.as_secs()),
-                    ),
-                    TargetStatus::Building => {
-                        let elapsed = target
-                            .started_at
-                            .map(|s| s.elapsed().as_secs())
-                            .unwrap_or(0);
-                        (
-                            "\u{2699}",
-                            Style::default().fg(Color::Blue),
-                            format!("[building {}s...]", elapsed),
-                        )
-                    }
-                    TargetStatus::Failed(_) => (
-                        "\u{2717}",
-                        Style::default().fg(Color::Red),
-                        "FAILED".to_string(),
-                    ),
-                    TargetStatus::Pending => continue,
-                };
-
                 let is_selected = selectable.get(cursor).map(|s| s.as_str()) == Some(&target.name);
-                let line_style = if is_selected {
+                let prefix = if is_selected { "\u{25b6} " } else { "  " };
+                let line_bg = if is_selected {
                     Style::default().bg(Color::DarkGray)
                 } else {
                     Style::default()
                 };
 
-                let prefix = if is_selected { " \u{25b6} " } else { "   " };
+                let line = match &target.status {
+                    TargetStatus::Building => {
+                        let (bar, pct_str, desc) = match &target.progress {
+                            Some(p) if p.total_steps > 0 => {
+                                let pct =
+                                    (p.current_step as f64 / p.total_steps as f64 * 100.0) as u32;
+                                let pct = pct.min(100);
+                                let filled = (pct as usize * bar_width) / 100;
+                                let empty = bar_width - filled;
+                                let bar = format!(
+                                    "{}{}",
+                                    "\u{2588}".repeat(filled),
+                                    "\u{2591}".repeat(empty)
+                                );
+                                (
+                                    bar,
+                                    format!("{:3}%", pct),
+                                    truncate(&p.step_description, 40),
+                                )
+                            }
+                            _ => {
+                                let elapsed = target
+                                    .started_at
+                                    .map(|s| s.elapsed().as_secs())
+                                    .unwrap_or(0);
+                                (
+                                    "\u{2591}".repeat(bar_width),
+                                    "  ?%".to_string(),
+                                    format!("starting... {}s", elapsed),
+                                )
+                            }
+                        };
+                        Line::from(vec![
+                            Span::styled(prefix, line_bg),
+                            Span::styled(
+                                format!("[{}]", short_node(node_name)),
+                                Style::default().fg(Color::Yellow).patch(line_bg),
+                            ),
+                            Span::styled(
+                                format!(" {:<20} ", target.name),
+                                Style::default().patch(line_bg),
+                            ),
+                            Span::styled(bar, Style::default().fg(Color::Green).patch(line_bg)),
+                            Span::styled(format!(" {} ", pct_str), Style::default().patch(line_bg)),
+                            Span::styled(desc, Style::default().fg(Color::DarkGray).patch(line_bg)),
+                        ])
+                    }
+                    TargetStatus::Done(dur) => {
+                        let bar = "\u{2588}".repeat(bar_width);
+                        Line::from(vec![
+                            Span::styled(prefix, line_bg),
+                            Span::styled(
+                                format!("[{}]", short_node(node_name)),
+                                Style::default().fg(Color::Yellow).patch(line_bg),
+                            ),
+                            Span::styled(
+                                format!(" {:<20} ", target.name),
+                                Style::default().patch(line_bg),
+                            ),
+                            Span::styled(bar, Style::default().fg(Color::Green).patch(line_bg)),
+                            Span::styled(" 100% ", Style::default().patch(line_bg)),
+                            Span::styled(
+                                format!("done ({}s)", dur.as_secs()),
+                                Style::default().fg(Color::Green).patch(line_bg),
+                            ),
+                        ])
+                    }
+                    TargetStatus::Failed(err) => {
+                        let bar = "\u{2591}".repeat(bar_width);
+                        let short_err = truncate(err, 40);
+                        Line::from(vec![
+                            Span::styled(prefix, line_bg),
+                            Span::styled(
+                                format!("[{}]", short_node(node_name)),
+                                Style::default().fg(Color::Yellow).patch(line_bg),
+                            ),
+                            Span::styled(
+                                format!(" {:<20} ", target.name),
+                                Style::default().patch(line_bg),
+                            ),
+                            Span::styled(bar, Style::default().fg(Color::Red).patch(line_bg)),
+                            Span::styled(
+                                " FAIL ",
+                                Style::default().fg(Color::Red).bold().patch(line_bg),
+                            ),
+                            Span::styled(short_err, Style::default().fg(Color::Red).patch(line_bg)),
+                        ])
+                    }
+                    TargetStatus::Pending => continue,
+                };
 
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, line_style),
-                    Span::styled(symbol, style.patch(line_style)),
-                    Span::styled(format!(" {:24} {}", target.name, detail), line_style),
-                ]));
+                lines.push(line);
             }
-
-            let node_widget = Paragraph::new(lines);
-            frame.render_widget(node_widget, node_areas[i]);
         }
 
-        // Queue
+        if lines.is_empty() {
+            lines.push(Line::styled(
+                "  waiting for builds to start...",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        let builds_widget = Paragraph::new(lines);
+        frame.render_widget(builds_widget, chunks[1]);
+
+        // Queue + idle nodes
+        let idle_nodes: Vec<&str> = s
+            .node_names
+            .iter()
+            .filter(|n| {
+                !s.targets
+                    .values()
+                    .any(|t| t.node == **n && matches!(t.status, TargetStatus::Building))
+            })
+            .map(|n| n.as_str())
+            .collect();
+
         let pending = s.pending_targets();
-        let queue_text = if pending.is_empty() {
-            " Queue: empty".to_string()
-        } else {
+        let mut queue_lines = Vec::new();
+
+        if !pending.is_empty() {
             let shown: Vec<&str> = pending.iter().take(5).copied().collect();
             let extra = if pending.len() > 5 {
                 format!(", +{} more", pending.len() - 5)
             } else {
                 String::new()
             };
-            format!(
-                " Queue: {} pending [{}{}]",
-                pending.len(),
-                shown.join(", "),
-                extra
-            )
-        };
-        let queue_widget = Paragraph::new(queue_text).block(Block::default().borders(Borders::TOP));
+            queue_lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" \u{25cb} {} pending", pending.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(format!(" [{}{}]", shown.join(", "), extra)),
+            ]));
+        }
+
+        if !idle_nodes.is_empty() {
+            let idle_names: Vec<String> = idle_nodes.iter().map(|n| short_node(n)).collect();
+            queue_lines.push(Line::from(vec![
+                Span::styled(" [idle ] ", Style::default().fg(Color::DarkGray)),
+                Span::raw(idle_names.join(", ")),
+            ]));
+        }
+
+        if queue_lines.is_empty() {
+            queue_lines.push(Line::raw(""));
+        }
+
+        let queue_widget =
+            Paragraph::new(queue_lines).block(Block::default().borders(Borders::TOP));
         frame.render_widget(queue_widget, chunks[2]);
 
         // Footer
-        let elapsed = s.elapsed();
-        let mins = elapsed.as_secs() / 60;
-        let secs = elapsed.as_secs() % 60;
         let footer = format!(
-            " \u{2713} {} done | \u{2699} {} building | \u{25cb} {} pending | \u{2717} {} failed | {}m {:02}s | j/k:select Enter:logs",
+            " \u{2713} {} done | \u{2699} {} building | \u{25cb} {} pending | \u{2717} {} failed | j/k:select Enter:logs q:quit",
             s.count_done(),
             s.count_building(),
             s.count_pending(),
             s.count_failed(),
-            mins,
-            secs
         );
         let footer_widget = Paragraph::new(footer)
             .block(Block::default().borders(Borders::TOP))
@@ -433,6 +477,27 @@ impl Dashboard {
         let footer = format!(" Esc:back | j/k:scroll | g:top G:bottom |{}", scroll_hint);
         let footer_widget = Paragraph::new(footer).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer_widget, chunks[2]);
+    }
+}
+
+/// Shorten a node name for the compact display.
+/// e.g. "buildx_buildkit_zot-m3-pro0" -> "zot-m3-pro0"
+fn short_node(name: &str) -> String {
+    if let Some(pos) = name.rfind("buildkit_") {
+        name[pos + 9..].to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Truncate a string to max_len, adding "..." if truncated.
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else if max_len > 3 {
+        format!("{}...", &s[..max_len - 3])
+    } else {
+        s[..max_len].to_string()
     }
 }
 

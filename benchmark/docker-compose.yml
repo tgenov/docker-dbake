@@ -1,0 +1,154 @@
+# Auto-generated benchmark compose file.
+# Each service does real CPU work (prime computation + package installs)
+# to simulate builds that saturate node resources.
+services:
+  svc-001:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-001
+    image: benchmark/svc-001:latest
+  svc-002:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-002
+    image: benchmark/svc-002:latest
+  svc-003:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-003
+    image: benchmark/svc-003:latest
+  svc-004:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-004
+    image: benchmark/svc-004:latest
+  svc-005:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-005
+    image: benchmark/svc-005:latest
+  svc-006:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-006
+    image: benchmark/svc-006:latest
+  svc-007:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-007
+    image: benchmark/svc-007:latest
+  svc-008:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-008
+    image: benchmark/svc-008:latest
+  svc-009:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-009
+    image: benchmark/svc-009:latest
+  svc-010:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-010
+    image: benchmark/svc-010:latest
+  svc-011:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-011
+    image: benchmark/svc-011:latest
+  svc-012:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-012
+    image: benchmark/svc-012:latest
+  svc-013:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-013
+    image: benchmark/svc-013:latest
+  svc-014:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-014
+    image: benchmark/svc-014:latest
+  svc-015:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-015
+    image: benchmark/svc-015:latest
+  svc-016:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-016
+    image: benchmark/svc-016:latest
+  svc-017:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-017
+    image: benchmark/svc-017:latest
+  svc-018:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-018
+    image: benchmark/svc-018:latest
+  svc-019:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-019
+    image: benchmark/svc-019:latest
+  svc-020:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-020
+    image: benchmark/svc-020:latest
+  svc-021:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-021
+    image: benchmark/svc-021:latest
+  svc-022:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-022
+    image: benchmark/svc-022:latest
+  svc-023:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-023
+    image: benchmark/svc-023:latest
+  svc-024:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-024
+    image: benchmark/svc-024:latest
+  svc-025:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-025
+    image: benchmark/svc-025:latest
+  svc-026:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-026
+    image: benchmark/svc-026:latest
+  svc-027:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-027
+    image: benchmark/svc-027:latest
+  svc-028:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-028
+    image: benchmark/svc-028:latest
+  svc-029:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-029
+    image: benchmark/svc-029:latest
+  svc-030:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.svc-030
+    image: benchmark/svc-030:latest

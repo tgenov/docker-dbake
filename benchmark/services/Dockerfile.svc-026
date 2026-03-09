@@ -1,0 +1,5 @@
+FROM alpine:3.21
+RUN apk add --no-cache build-base linux-headers
+COPY services/workload.c /tmp/workload.c
+RUN gcc -O2 -o /tmp/workload /tmp/workload.c -lm \
+    && /tmp/workload 15000000

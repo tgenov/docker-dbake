@@ -10,6 +10,16 @@ pub enum TargetStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BuildProgress {
+    /// Current user-visible step (e.g. 3 in [3/5])
+    pub current_step: u32,
+    /// Total user-visible steps (e.g. 5 in [3/5])
+    pub total_steps: u32,
+    /// Description of the current step (e.g. "RUN npm install")
+    pub step_description: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetInfo {
     pub name: String,
@@ -17,6 +27,7 @@ pub struct TargetInfo {
     pub status: TargetStatus,
     pub started_at: Option<Instant>,
     pub log_path: Option<PathBuf>,
+    pub progress: Option<BuildProgress>,
 }
 
 #[derive(Debug)]
@@ -41,6 +52,7 @@ impl DashboardState {
                     status: TargetStatus::Pending,
                     started_at: None,
                     log_path: None,
+                    progress: None,
                 },
             );
         }
@@ -58,8 +70,15 @@ impl DashboardState {
             info.node = node.to_string();
             if matches!(status, TargetStatus::Building) {
                 info.started_at = Some(Instant::now());
+                info.progress = None;
             }
             info.status = status;
+        }
+    }
+
+    pub fn update_progress(&mut self, target: &str, progress: BuildProgress) {
+        if let Some(info) = self.targets.get_mut(target) {
+            info.progress = Some(progress);
         }
     }
 

@@ -156,6 +156,14 @@ impl DagQueue {
         self.ready.is_empty() && self.in_flight.is_empty() && !self.is_done()
     }
 
+    /// Get the required platforms for a target (empty if unconstrained).
+    pub fn target_platforms(&self, target: &str) -> &[String] {
+        self.target_platforms
+            .get(target)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Number of targets ready to be claimed.
     #[cfg(test)]
     pub fn ready_count(&self) -> usize {
