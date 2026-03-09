@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::builder::node::ShardNode;
 use crate::dag::DagQueue;
-use crate::executor::bake::{BakeConfig, TargetCacheConfig, execute_bake};
+use crate::executor::bake::{execute_bake, BakeConfig, TargetCacheConfig};
 use crate::tui::state::{DashboardState, TargetStatus};
 
 /// Shared DAG queue wrapped for concurrent access.
@@ -63,7 +63,9 @@ async fn node_worker(
         };
 
         // Set log path and mark as building
-        let log_path = std::env::temp_dir().join("dbake-logs").join(format!("{}.log", target));
+        let log_path = std::env::temp_dir()
+            .join("dbake-logs")
+            .join(format!("{}.log", target));
         {
             let mut dashboard = state.lock().unwrap();
             if let Some(info) = dashboard.targets.get_mut(&target) {
@@ -138,8 +140,14 @@ pub async fn dispatch(
         let cache_configs = cache_configs.clone();
         let cancel = cancel.clone();
 
-        let handle =
-            tokio::spawn(node_worker(node, shared_dag, state, config, cache_configs, cancel));
+        let handle = tokio::spawn(node_worker(
+            node,
+            shared_dag,
+            state,
+            config,
+            cache_configs,
+            cancel,
+        ));
         handles.push(handle);
     }
 
@@ -159,7 +167,11 @@ pub async fn dispatch(
         drop(queue);
         let mut dashboard = state.lock().unwrap();
         for target in &blocked {
-            dashboard.set_target_status(target, "", TargetStatus::Failed("blocked by failed dependency".into()));
+            dashboard.set_target_status(
+                target,
+                "",
+                TargetStatus::Failed("blocked by failed dependency".into()),
+            );
         }
     }
 

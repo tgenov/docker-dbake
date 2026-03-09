@@ -46,10 +46,7 @@ async fn main() -> Result<()> {
     }
 
     // Strip "dbake" if invoked as `docker dbake` (docker passes plugin name as argv[1])
-    let filtered_args: Vec<String> = args
-        .into_iter()
-        .filter(|a| a != "dbake")
-        .collect();
+    let filtered_args: Vec<String> = args.into_iter().filter(|a| a != "dbake").collect();
 
     let cli = Cli::parse_from(&filtered_args);
 
@@ -123,8 +120,7 @@ async fn main() -> Result<()> {
             bake_print.target.keys().cloned().collect();
         let mut expanded: std::collections::HashSet<String> =
             target_names.iter().cloned().collect();
-        let mut queue: std::collections::VecDeque<String> =
-            target_names.iter().cloned().collect();
+        let mut queue: std::collections::VecDeque<String> = target_names.iter().cloned().collect();
 
         while let Some(t) = queue.pop_front() {
             if let Some(dep_list) = all_deps.get(&t) {

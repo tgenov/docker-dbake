@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -47,10 +47,7 @@ pub async fn execute_bake(
     if let Some(ref registry) = config.cache_registry {
         // If the target already has cache-from entries in the file, bake will
         // use them. We append our registry cache via --set which merges.
-        let registry_from = format!(
-            "type=registry,ref={}/buildcache/{}",
-            registry, target
-        );
+        let registry_from = format!("type=registry,ref={}/buildcache/{}", registry, target);
         let registry_to = format!(
             "type=registry,ref={}/buildcache/{},mode=max",
             registry, target
@@ -75,14 +72,8 @@ pub async fn execute_bake(
             }
         } else {
             // No file-level cache — just add registry cache
-            cmd.args([
-                "--set",
-                &format!("{}.cache-from={}", target, registry_from),
-            ]);
-            cmd.args([
-                "--set",
-                &format!("{}.cache-to={}", target, registry_to),
-            ]);
+            cmd.args(["--set", &format!("{}.cache-from={}", target, registry_from)]);
+            cmd.args(["--set", &format!("{}.cache-to={}", target, registry_to)]);
         }
     }
 

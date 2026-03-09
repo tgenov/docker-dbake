@@ -92,11 +92,7 @@ impl DashboardState {
     }
 
     pub fn targets_for_node(&self, node: &str) -> Vec<&TargetInfo> {
-        let mut targets: Vec<_> = self
-            .targets
-            .values()
-            .filter(|t| t.node == node)
-            .collect();
+        let mut targets: Vec<_> = self.targets.values().filter(|t| t.node == node).collect();
         targets.sort_by_key(|t| &t.name);
         targets
     }
@@ -138,9 +134,7 @@ impl DashboardState {
             let mut node_targets: Vec<&str> = self
                 .targets
                 .values()
-                .filter(|t| {
-                    t.node == *node_name && !matches!(t.status, TargetStatus::Pending)
-                })
+                .filter(|t| t.node == *node_name && !matches!(t.status, TargetStatus::Pending))
                 .map(|t| t.name.as_str())
                 .collect();
             node_targets.sort();

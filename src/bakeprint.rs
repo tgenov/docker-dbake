@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Command;
@@ -68,7 +68,15 @@ pub struct BakeGroup {
 /// HCL bake files and docker-compose YAML.
 pub fn bake_print(file: &str, builder: &str) -> Result<BakePrint> {
     let output = Command::new("docker")
-        .args(["buildx", "bake", "--builder", builder, "-f", file, "--print"])
+        .args([
+            "buildx",
+            "bake",
+            "--builder",
+            builder,
+            "-f",
+            file,
+            "--print",
+        ])
         .output()
         .context("failed to run `docker buildx bake --print`")?;
 
@@ -77,8 +85,8 @@ pub fn bake_print(file: &str, builder: &str) -> Result<BakePrint> {
         bail!("docker buildx bake --print failed: {}", stderr.trim());
     }
 
-    let print: BakePrint = serde_json::from_slice(&output.stdout)
-        .context("failed to parse bake --print JSON")?;
+    let print: BakePrint =
+        serde_json::from_slice(&output.stdout).context("failed to parse bake --print JSON")?;
 
     Ok(print)
 }
@@ -87,8 +95,7 @@ pub fn bake_print(file: &str, builder: &str) -> Result<BakePrint> {
 /// `docker buildx bake --print` resolves targets but doesn't include depends_on
 /// in its JSON output, so we parse the source file for dependency edges.
 pub fn extract_depends_on(file: &str) -> Result<HashMap<String, Vec<String>>> {
-    let content = std::fs::read_to_string(file)
-        .context(format!("failed to read {}", file))?;
+    let content = std::fs::read_to_string(file).context(format!("failed to read {}", file))?;
 
     // Try HCL-style parsing first (target blocks with depends_on)
     if file.ends_with(".hcl") || content.contains("target \"") {
@@ -167,8 +174,8 @@ fn parse_yaml_depends_on(content: &str) -> Result<HashMap<String, Vec<String>>> 
         Map(HashMap<String, serde_json::Value>),
     }
 
-    let compose: ComposeFile = serde_yaml::from_str(content)
-        .context("failed to parse compose YAML for depends_on")?;
+    let compose: ComposeFile =
+        serde_yaml::from_str(content).context("failed to parse compose YAML for depends_on")?;
 
     let mut deps = HashMap::new();
     for (name, svc) in compose.services {
@@ -273,9 +280,6 @@ services:
             parse_hcl_string_list(r#"["foo", "bar", "baz"]"#),
             vec!["foo", "bar", "baz"]
         );
-        assert_eq!(
-            parse_hcl_string_list(r#"["single"]"#),
-            vec!["single"]
-        );
+        assert_eq!(parse_hcl_string_list(r#"["single"]"#), vec!["single"]);
     }
 }

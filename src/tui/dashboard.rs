@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
@@ -30,7 +30,10 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
-    pub fn new(state: Arc<Mutex<DashboardState>>, cancel: CancellationToken) -> anyhow::Result<Self> {
+    pub fn new(
+        state: Arc<Mutex<DashboardState>>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Self> {
         enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(io::stdout());
@@ -183,18 +186,14 @@ impl Dashboard {
         Ok(())
     }
 
-    fn draw_overview(
-        frame: &mut Frame,
-        state: &Arc<Mutex<DashboardState>>,
-        cursor: usize,
-    ) {
+    fn draw_overview(frame: &mut Frame, state: &Arc<Mutex<DashboardState>>, cursor: usize) {
         let s = state.lock().unwrap();
         let area = frame.area();
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),  // Header
+                Constraint::Length(2), // Header
                 Constraint::Min(4),    // Node sections
                 Constraint::Length(3), // Queue
                 Constraint::Length(3), // Footer
@@ -207,19 +206,15 @@ impl Dashboard {
             s.node_names.len(),
             s.total,
         );
-        let header_widget =
-            Paragraph::new(header).style(Style::default().fg(Color::Cyan).bold());
+        let header_widget = Paragraph::new(header).style(Style::default().fg(Color::Cyan).bold());
         frame.render_widget(header_widget, chunks[0]);
 
         // Build flat list of selectable targets for cursor highlighting
         let selectable: Vec<String> = s.active_targets().iter().map(|s| s.to_string()).collect();
 
         // Node sections
-        let node_constraints: Vec<Constraint> = s
-            .node_names
-            .iter()
-            .map(|_| Constraint::Min(3))
-            .collect();
+        let node_constraints: Vec<Constraint> =
+            s.node_names.iter().map(|_| Constraint::Min(3)).collect();
         let node_areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints(node_constraints)
@@ -324,10 +319,14 @@ impl Dashboard {
             } else {
                 String::new()
             };
-            format!(" Queue: {} pending [{}{}]", pending.len(), shown.join(", "), extra)
+            format!(
+                " Queue: {} pending [{}{}]",
+                pending.len(),
+                shown.join(", "),
+                extra
+            )
         };
-        let queue_widget = Paragraph::new(queue_text)
-            .block(Block::default().borders(Borders::TOP));
+        let queue_widget = Paragraph::new(queue_text).block(Block::default().borders(Borders::TOP));
         frame.render_widget(queue_widget, chunks[2]);
 
         // Footer
@@ -362,11 +361,15 @@ impl Dashboard {
             Some(info) => match &info.status {
                 TargetStatus::Building => {
                     let elapsed = info.started_at.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-                    (format!("building ({}s)", elapsed), Style::default().fg(Color::Blue))
+                    (
+                        format!("building ({}s)", elapsed),
+                        Style::default().fg(Color::Blue),
+                    )
                 }
-                TargetStatus::Done(dur) => {
-                    (format!("done ({}s)", dur.as_secs()), Style::default().fg(Color::Green))
-                }
+                TargetStatus::Done(dur) => (
+                    format!("done ({}s)", dur.as_secs()),
+                    Style::default().fg(Color::Green),
+                ),
                 TargetStatus::Failed(e) => {
                     (format!("FAILED: {}", e), Style::default().fg(Color::Red))
                 }
@@ -375,10 +378,7 @@ impl Dashboard {
             None => ("unknown".to_string(), Style::default()),
         };
 
-        let log_path = s
-            .targets
-            .get(target)
-            .and_then(|info| info.log_path.clone());
+        let log_path = s.targets.get(target).and_then(|info| info.log_path.clone());
 
         let node = s
             .targets
@@ -392,7 +392,7 @@ impl Dashboard {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // Header
-                Constraint::Min(3),   // Log content
+                Constraint::Min(3),    // Log content
                 Constraint::Length(2), // Footer
             ])
             .split(area);
@@ -403,10 +403,7 @@ impl Dashboard {
                 format!(" {} ", target),
                 Style::default().fg(Color::Cyan).bold(),
             ),
-            Span::styled(
-                format!("[{}] ", node),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(format!("[{}] ", node), Style::default().fg(Color::Yellow)),
             Span::styled(status_str, status_style),
         ]);
         let header_widget = Paragraph::new(header);
@@ -419,12 +416,9 @@ impl Dashboard {
             None => vec!["(no log file)".to_string()],
         };
 
-        let text: Vec<Line> = log_lines
-            .into_iter()
-            .map(|l| Line::raw(l))
-            .collect();
-        let log_widget = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title(" Build Log "));
+        let text: Vec<Line> = log_lines.into_iter().map(|l| Line::raw(l)).collect();
+        let log_widget =
+            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Build Log "));
         frame.render_widget(log_widget, chunks[1]);
 
         // Footer
@@ -433,12 +427,8 @@ impl Dashboard {
         } else {
             " tail |".to_string()
         };
-        let footer = format!(
-            " Esc:back | j/k:scroll | g:top G:bottom |{}",
-            scroll_hint
-        );
-        let footer_widget = Paragraph::new(footer)
-            .style(Style::default().fg(Color::DarkGray));
+        let footer = format!(" Esc:back | j/k:scroll | g:top G:bottom |{}", scroll_hint);
+        let footer_widget = Paragraph::new(footer).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer_widget, chunks[2]);
     }
 }

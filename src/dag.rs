@@ -77,8 +77,14 @@ impl DagQueue {
             }
             for dep in dep_list {
                 if all.contains(dep) {
-                    forward.entry(target.clone()).or_default().insert(dep.clone());
-                    reverse.entry(dep.clone()).or_default().insert(target.clone());
+                    forward
+                        .entry(target.clone())
+                        .or_default()
+                        .insert(dep.clone());
+                    reverse
+                        .entry(dep.clone())
+                        .or_default()
+                        .insert(target.clone());
                 }
             }
         }
@@ -326,9 +332,7 @@ mod tests {
     fn test_platform_variant_matching() {
         // Node supports linux/amd64/v2, target wants linux/amd64
         let targets = vec!["app".into()];
-        let platforms = HashMap::from([
-            ("app".to_string(), vec!["linux/amd64".to_string()]),
-        ]);
+        let platforms = HashMap::from([("app".to_string(), vec!["linux/amd64".to_string()])]);
         let mut q = DagQueue::new(targets, HashMap::new(), platforms);
 
         let node = vec!["linux/amd64/v2".into()];
@@ -339,9 +343,7 @@ mod tests {
     #[test]
     fn test_no_compatible_node_skips() {
         let targets = vec!["arm-only".into()];
-        let platforms = HashMap::from([
-            ("arm-only".to_string(), vec!["linux/arm64".to_string()]),
-        ]);
+        let platforms = HashMap::from([("arm-only".to_string(), vec!["linux/arm64".to_string()])]);
         let mut q = DagQueue::new(targets, HashMap::new(), platforms);
 
         let amd_node = vec!["linux/amd64".into()];
