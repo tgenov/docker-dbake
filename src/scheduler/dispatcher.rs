@@ -40,7 +40,7 @@ async fn node_worker(
 
         // Try to claim a ready target compatible with this node's platforms
         let target = {
-            let mut q = dag.queue.lock().unwrap();
+            let mut q = dag.queue.lock().unwrap_or_else(|p| p.into_inner());
             q.claim_for_platforms(&node.platforms)
         };
 
@@ -48,7 +48,7 @@ async fn node_worker(
             Some(t) => t,
             None => {
                 let (done, stalled) = {
-                    let q = dag.queue.lock().unwrap();
+                    let q = dag.queue.lock().unwrap_or_else(|p| p.into_inner());
                     (q.is_done(), q.is_stalled())
                 };
 
@@ -67,7 +67,7 @@ async fn node_worker(
             .join("dbake-logs")
             .join(format!("{}.log", target));
         {
-            let mut dashboard = state.lock().unwrap();
+            let mut dashboard = state.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(info) = dashboard.targets.get_mut(&target) {
                 info.log_path = Some(log_path);
             }
@@ -81,7 +81,7 @@ async fn node_worker(
         let elapsed = start.elapsed();
 
         {
-            let mut dashboard = state.lock().unwrap();
+            let mut dashboard = state.lock().unwrap_or_else(|p| p.into_inner());
             match &result {
                 Ok(_) => {
                     dashboard.set_target_status(&target, &node.name, TargetStatus::Done(elapsed));
@@ -97,7 +97,7 @@ async fn node_worker(
         }
 
         {
-            let mut queue = dag.queue.lock().unwrap();
+            let mut queue = dag.queue.lock().unwrap_or_else(|p| p.into_inner());
             match result {
                 Ok(_) => queue.complete(&target),
                 Err(_) => {
@@ -124,6 +124,16 @@ pub async fn dispatch(
     state: Arc<std::sync::Mutex<DashboardState>>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    // Check for dependency cycles before dispatching
+    let cycles = dag.detect_cycles();
+    if !cycles.is_empty() {
+        eprintln!("\nWarning: dependency cycles detected:");
+        for cycle in &cycles {
+            eprintln!("  {} → {}", cycle.join(" → "), cycle[0]);
+        }
+        eprintln!("Targets in cycles will never be built.\n");
+    }
+
     let shared_dag = Arc::new(SharedDag {
         queue: std::sync::Mutex::new(dag),
         wakeup: Notify::new(),
@@ -156,7 +166,7 @@ pub async fn dispatch(
     }
 
     // Report any targets blocked by failed dependencies
-    let queue = shared_dag.queue.lock().unwrap();
+    let queue = shared_dag.queue.lock().unwrap_or_else(|p| p.into_inner());
     let blocked = queue.blocked_targets();
     if !blocked.is_empty() {
         eprintln!(
@@ -165,7 +175,7 @@ pub async fn dispatch(
             blocked.join(", ")
         );
         drop(queue);
-        let mut dashboard = state.lock().unwrap();
+        let mut dashboard = state.lock().unwrap_or_else(|p| p.into_inner());
         for target in &blocked {
             dashboard.set_target_status(
                 target,

@@ -24,7 +24,7 @@ pub fn create_shard(builder_prefix: &str, node: &Node, platform: Option<&str>) -
 
     let output = cmd
         .output()
-        .context(format!("failed to create shard builder {}", shard_name))?;
+        .with_context(|| format!("failed to create shard builder {}", shard_name))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

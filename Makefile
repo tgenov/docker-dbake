@@ -1,6 +1,6 @@
 PLUGIN_DIR := $(HOME)/.docker/cli-plugins
 
-.PHONY: build install uninstall clean test
+.PHONY: build install uninstall clean test check ci-local
 
 build:
 	cargo build --release
@@ -20,3 +20,11 @@ clean:
 
 test:
 	cargo test
+
+check:
+	cargo fmt -- --check
+	cargo clippy -- -D warnings
+	cargo test
+
+ci-local:
+	act -j check

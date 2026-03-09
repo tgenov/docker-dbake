@@ -7,7 +7,7 @@ use crate::bakeprint::CacheEntry;
 /// Global configuration for bake execution, shared across all targets.
 #[derive(Debug, Clone)]
 pub struct BakeConfig {
-    pub file: String,
+    pub file: std::path::PathBuf,
     pub progress: String,
     pub cache_registry: Option<String>,
     pub no_cache: bool,
@@ -39,7 +39,7 @@ pub async fn execute_bake(
     let mut cmd = Command::new("docker");
     cmd.args(["buildx", "bake"]);
     cmd.args(["--builder", builder]);
-    cmd.args(["-f", &config.file]);
+    cmd.args(["-f", &config.file.to_string_lossy()]);
     cmd.args(["--progress", &config.progress]);
 
     // Aggregate cache: file-level cache entries are already in the bake file.
@@ -97,7 +97,7 @@ pub async fn execute_bake(
     let log_path = log_dir.join(format!("{}.log", target));
 
     let log_file = std::fs::File::create(&log_path)
-        .context(format!("failed to create log file {}", log_path.display()))?;
+        .with_context(|| format!("failed to create log file {}", log_path.display()))?;
     let log_file_err = log_file.try_clone()?;
 
     cmd.stdout(Stdio::from(log_file));
@@ -106,7 +106,7 @@ pub async fn execute_bake(
     let status = cmd
         .status()
         .await
-        .context(format!("failed to execute bake for target {}", target))?;
+        .with_context(|| format!("failed to execute bake for target {}", target))?;
 
     if !status.success() {
         bail!(

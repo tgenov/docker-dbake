@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -8,7 +10,7 @@ use clap::Parser;
 pub struct Cli {
     /// Compose/bake file
     #[arg(short = 'f', long = "file", default_value = "docker-compose.yml")]
-    pub file: String,
+    pub file: PathBuf,
 
     /// Buildx builder name [default: current active builder]
     #[arg(long)]

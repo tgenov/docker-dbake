@@ -7,6 +7,7 @@ mod executor;
 mod plugin;
 mod scheduler;
 mod tui;
+mod utils;
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -60,7 +61,7 @@ async fn main() -> Result<()> {
 
     // Discover nodes
     let nodes = builder::inspect::discover_nodes(&builder_name)
-        .context(format!("failed to inspect builder '{}'", builder_name))?;
+        .with_context(|| format!("failed to inspect builder '{}'", builder_name))?;
 
     if nodes.is_empty() {
         anyhow::bail!("no TCP nodes found in builder '{}'", builder_name);
@@ -85,7 +86,7 @@ async fn main() -> Result<()> {
     // For compose YAML, depends_on is runtime startup order (not build order),
     // so we only use it for --with-deps target expansion, not DAG scheduling.
     // For HCL bake files, depends_on IS a build dependency.
-    let is_hcl = cli.file.ends_with(".hcl")
+    let is_hcl = cli.file.extension().is_some_and(|e| e == "hcl")
         || std::fs::read_to_string(&cli.file)
             .map(|c| c.contains("target \""))
             .unwrap_or(false);
@@ -97,7 +98,7 @@ async fn main() -> Result<()> {
 
     // Filter by profile if using compose YAML
     if let Some(ref profile) = cli.profile {
-        let compose = compose::parser::parse_compose(std::path::Path::new(&cli.file))?;
+        let compose = compose::parser::parse_compose(&cli.file)?;
         let profile_services: std::collections::HashSet<String> = compose
             .services
             .iter()
@@ -260,7 +261,7 @@ async fn main() -> Result<()> {
     };
 
     let config = BakeConfig {
-        file: cli.file.clone(),
+        file: cli.file,
         progress: bake_progress,
         cache_registry: cli.cache_registry.clone(),
         no_cache: cli.no_cache,
@@ -336,7 +337,7 @@ async fn main() -> Result<()> {
     }
 
     // Print summary
-    let s = state.lock().unwrap();
+    let s = utils::lock_or_recover(&state);
     let failed = s.failed_targets();
 
     if !failed.is_empty() {

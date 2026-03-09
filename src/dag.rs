@@ -26,13 +26,15 @@ pub struct DagQueue {
 /// "linux/amd64", "linux/amd64/v2" etc. We compare the base arch.
 fn platform_base(p: &str) -> &str {
     // "linux/amd64/v2" → "linux/amd64", "linux/arm64" → "linux/arm64"
-    let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() >= 2 {
-        // Return "os/arch" without variant
-        let end = p.find('/').unwrap() + 1 + parts[1].len();
-        &p[..end]
-    } else {
-        p
+    match p.find('/') {
+        Some(first_slash) => {
+            let rest = &p[first_slash + 1..];
+            match rest.find('/') {
+                Some(second_slash) => &p[..first_slash + 1 + second_slash],
+                None => p, // only "os/arch", no variant
+            }
+        }
+        None => p,
     }
 }
 
@@ -76,6 +78,13 @@ impl DagQueue {
                 continue;
             }
             for dep in dep_list {
+                if dep == target {
+                    eprintln!(
+                        "warning: target '{}' depends on itself — ignoring self-dependency",
+                        target
+                    );
+                    continue;
+                }
                 if all.contains(dep) {
                     forward
                         .entry(target.clone())
@@ -165,6 +174,54 @@ impl DagQueue {
             })
             .cloned()
             .collect()
+    }
+
+    /// Detect cycles in the dependency graph using DFS.
+    /// Returns a list of cycles, where each cycle is a list of target names.
+    /// An empty return means the graph is acyclic.
+    pub fn detect_cycles(&self) -> Vec<Vec<String>> {
+        let mut visited = HashSet::new();
+        let mut on_stack = HashSet::new();
+        let mut stack = Vec::new();
+        let mut cycles = Vec::new();
+
+        for target in &self.all {
+            if !visited.contains(target) {
+                self.dfs_cycle(target, &mut visited, &mut on_stack, &mut stack, &mut cycles);
+            }
+        }
+
+        cycles
+    }
+
+    fn dfs_cycle(
+        &self,
+        node: &str,
+        visited: &mut HashSet<String>,
+        on_stack: &mut HashSet<String>,
+        stack: &mut Vec<String>,
+        cycles: &mut Vec<Vec<String>>,
+    ) {
+        visited.insert(node.to_string());
+        on_stack.insert(node.to_string());
+        stack.push(node.to_string());
+
+        if let Some(deps) = self.deps.get(node) {
+            for dep in deps {
+                if !visited.contains(dep) {
+                    self.dfs_cycle(dep, visited, on_stack, stack, cycles);
+                } else if on_stack.contains(dep) {
+                    // Found a cycle — extract it from the stack
+                    if let Some(pos) = stack.iter().position(|s| s == dep) {
+                        let cycle: Vec<String> = stack[pos..].to_vec();
+                        cycles.push(cycle);
+                    }
+                }
+            }
+        }
+
+        stack.pop();
+        on_stack.remove(node);
     }
 
     /// After completing a target, check all its dependents to see if they
@@ -350,5 +407,116 @@ mod tests {
         assert!(q.claim_for_platforms(&amd_node).is_none());
         // Target is still ready, just not for this node
         assert_eq!(q.ready_count(), 1);
+    }
+
+    #[test]
+    fn test_empty_targets() {
+        let q = DagQueue::new(vec![], HashMap::new(), no_platforms());
+        assert!(q.is_done());
+        assert!(!q.is_stalled());
+    }
+
+    #[test]
+    fn test_single_target() {
+        let mut q = DagQueue::new(vec!["solo".into()], HashMap::new(), no_platforms());
+        let any = vec!["linux/amd64".into()];
+        let t = q.claim_for_platforms(&any).unwrap();
+        assert_eq!(t, "solo");
+        q.complete("solo");
+        assert!(q.is_done());
+    }
+
+    #[test]
+    fn test_self_dependency_filtered() {
+        let deps = HashMap::from([("a".to_string(), vec!["a".to_string()])]);
+        let mut q = DagQueue::new(vec!["a".into()], deps, no_platforms());
+        // Self-dep should be filtered -- target should be ready
+        let any = vec!["linux/amd64".into()];
+        assert!(q.claim_for_platforms(&any).is_some());
+    }
+
+    #[test]
+    fn test_cycle_detection() {
+        let deps = HashMap::from([
+            ("a".to_string(), vec!["b".to_string()]),
+            ("b".to_string(), vec!["a".to_string()]),
+        ]);
+        let q = DagQueue::new(vec!["a".into(), "b".into()], deps, no_platforms());
+        let cycles = q.detect_cycles();
+        assert!(!cycles.is_empty());
+    }
+
+    #[test]
+    fn test_diamond_partial_failure() {
+        // A -> B, A -> C, B+C -> D. If B fails, D should stay blocked even after C completes.
+        let deps = HashMap::from([
+            ("b".to_string(), vec!["a".to_string()]),
+            ("c".to_string(), vec!["a".to_string()]),
+            ("d".to_string(), vec!["b".to_string(), "c".to_string()]),
+        ]);
+        let mut q = DagQueue::new(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            deps,
+            no_platforms(),
+        );
+        let any = vec!["linux/amd64".into()];
+
+        q.claim_for_platforms(&any); // a
+        q.complete("a");
+
+        q.claim_for_platforms(&any); // b
+        q.claim_for_platforms(&any); // c
+
+        q.fail("b");
+        q.complete("c");
+
+        // d should NOT be ready (b failed)
+        assert!(q.claim_for_platforms(&any).is_none());
+        assert!(!q.is_done());
+        assert!(q.blocked_targets().contains(&"d".to_string()));
+    }
+
+    #[test]
+    fn test_platforms_both_empty() {
+        // No platform constraint, no node platforms -- should still be compatible
+        assert!(super::platforms_compatible(&[], &[]));
+    }
+
+    #[test]
+    fn test_node_platforms_empty_target_constrained() {
+        // Node has no platforms but target requires one -- incompatible
+        assert!(!super::platforms_compatible(
+            &[],
+            &["linux/amd64".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_platform_base_edge_cases() {
+        assert_eq!(super::platform_base(""), "");
+        assert_eq!(super::platform_base("linux"), "linux");
+        assert_eq!(super::platform_base("linux/amd64"), "linux/amd64");
+        assert_eq!(super::platform_base("linux/amd64/v2"), "linux/amd64");
+        assert_eq!(super::platform_base("linux/arm/v7/extra"), "linux/arm");
+        assert_eq!(super::platform_base("/amd64"), "/amd64");
+    }
+
+    #[test]
+    fn test_wide_fanout() {
+        // One root, 50 dependents
+        let mut targets = vec!["root".to_string()];
+        let mut deps = HashMap::new();
+        for i in 0..50 {
+            let name = format!("child_{}", i);
+            deps.insert(name.clone(), vec!["root".to_string()]);
+            targets.push(name);
+        }
+        let mut q = DagQueue::new(targets, deps, no_platforms());
+        let any = vec!["linux/amd64".into()];
+
+        assert_eq!(q.ready_count(), 1);
+        q.claim_for_platforms(&any); // root
+        q.complete("root");
+        assert_eq!(q.ready_count(), 50);
     }
 }

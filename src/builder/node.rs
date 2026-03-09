@@ -1,5 +1,4 @@
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Node {
     pub name: String,
     pub endpoint: String,

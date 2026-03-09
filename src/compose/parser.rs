@@ -18,10 +18,10 @@ pub struct ComposeFile {
 
 /// Parse a compose YAML file for profile metadata.
 pub fn parse_compose(path: &Path) -> Result<ComposeFile> {
-    let content =
-        std::fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
-    let compose: ComposeFile =
-        serde_yaml::from_str(&content).context(format!("failed to parse {}", path.display()))?;
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let compose: ComposeFile = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(compose)
 }
 
