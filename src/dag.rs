@@ -352,7 +352,7 @@ mod tests {
     fn test_deps_outside_target_set_ignored() {
         let targets = vec!["a".into(), "b".into()];
         let deps = HashMap::from([("b".to_string(), vec!["external".to_string()])]);
-        let mut q = DagQueue::new(targets, deps, no_platforms());
+        let q = DagQueue::new(targets, deps, no_platforms());
         assert_eq!(q.ready_count(), 2);
     }
 
