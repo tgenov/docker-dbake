@@ -1,15 +1,17 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: ["Version Bump"]
+    types: [completed]
 
 permissions:
   contents: write
 
 jobs:
   build:
+    # Only run if version-bump succeeded (not on skip or failure)
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     strategy:
       matrix:
         include:
@@ -29,6 +31,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: tag
+        run: |
+          git fetch --tags
+          tag=$(git describe --tags --abbrev=0)
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+          echo "Building release for $tag"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,6 +73,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: tag
+        run: |
+          git fetch --tags
+          tag=$(git describe --tags --abbrev=0)
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -68,5 +91,6 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
           files: docker-dbake-*
