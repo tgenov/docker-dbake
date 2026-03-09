@@ -92,7 +92,7 @@ impl DagQueue {
         // Seed the ready queue with targets that have no (in-set) dependencies
         let mut ready = VecDeque::new();
         for t in &targets {
-            if forward.get(t).map_or(true, |d| d.is_empty()) {
+            if forward.get(t).is_none_or(|d| d.is_empty()) {
                 ready.push_back(t.clone());
             }
         }
@@ -187,7 +187,7 @@ impl DagQueue {
             let all_deps_done = self
                 .deps
                 .get(&dep)
-                .map_or(true, |d| d.iter().all(|dd| self.completed.contains(dd)));
+                .is_none_or(|d| d.iter().all(|dd| self.completed.contains(dd)));
 
             if all_deps_done {
                 self.ready.push_back(dep);

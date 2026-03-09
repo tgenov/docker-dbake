@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
     // Print the DAG
     let independent_count = target_names
         .iter()
-        .filter(|t| scoped_deps.get(*t).map_or(true, |d| d.is_empty()))
+        .filter(|t| scoped_deps.get(*t).is_none_or(|d| d.is_empty()))
         .count();
     let has_deps = target_names.len() - independent_count;
 
