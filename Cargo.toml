@@ -1,0 +1,21 @@
+[package]
+name = "docker-dbake"
+version = "0.1.0"
+edition = "2021"
+description = "Distributed Docker Bake — work-stealing across buildkitd nodes"
+
+[[bin]]
+name = "docker-dbake"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "2"
+ratatui = "0.30"
+crossterm = "0.29"
+tokio-util = { version = "0.7", features = ["rt"] }
