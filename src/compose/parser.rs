@@ -16,11 +16,21 @@ pub struct ComposeFile {
     pub services: HashMap<String, ComposeService>,
 }
 
+impl ComposeFile {
+    /// service name → declared profiles, for profile gating.
+    pub fn profiles(&self) -> HashMap<String, Vec<String>> {
+        self.services
+            .iter()
+            .map(|(name, svc)| (name.clone(), svc.profiles.clone()))
+            .collect()
+    }
+}
+
 /// Parse a compose YAML file for profile metadata.
 pub fn parse_compose(path: &Path) -> Result<ComposeFile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let compose: ComposeFile = serde_yaml::from_str(&content)
+    let compose: ComposeFile = serde_yaml_ng::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(compose)
 }
@@ -43,8 +53,26 @@ services:
   db:
     image: postgres
 "#;
-        let compose: ComposeFile = serde_yaml::from_str(yaml).unwrap();
+        let compose: ComposeFile = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(compose.services["web"].profiles, vec!["frontend"]);
         assert!(compose.services["api"].profiles.is_empty());
+    }
+
+    #[test]
+    fn test_profiles_map_covers_every_service() {
+        let yaml = r#"
+services:
+  web:
+    profiles: [frontend]
+  api:
+    build: .
+"#;
+        let compose: ComposeFile = serde_yaml_ng::from_str(yaml).unwrap();
+        let map = compose.profiles();
+        assert_eq!(map["web"], vec!["frontend"]);
+        assert!(
+            map["api"].is_empty(),
+            "profile-less services must be present"
+        );
     }
 }

@@ -26,10 +26,8 @@ pub struct ProgressParser {
     total_user_steps: u32,
     /// Description of the most recent active step
     current_description: String,
-    /// Number of completed buildkit steps (including internal ones)
-    completed_steps: u32,
-    /// Total buildkit steps seen
-    highest_step: u32,
+    /// Stage name from the most recent `[stage M/N]` line, if any
+    current_stage: Option<String>,
 }
 
 impl ProgressParser {
@@ -38,8 +36,7 @@ impl ProgressParser {
             current_user_step: 0,
             total_user_steps: 0,
             current_description: String::new(),
-            completed_steps: 0,
-            highest_step: 0,
+            current_stage: None,
         }
     }
 
@@ -51,16 +48,10 @@ impl ProgressParser {
         // Match lines starting with #N
         let rest = line.strip_prefix('#')?;
         let (num_str, description) = rest.split_once(' ')?;
-        let step_num: u32 = num_str.parse().ok()?;
-
-        // Track highest step seen
-        if step_num > self.highest_step {
-            self.highest_step = step_num;
-        }
+        let _step_num: u32 = num_str.parse().ok()?;
 
         // Check for DONE or CACHED lines
         if description == "DONE" || description.starts_with("DONE ") || description == "CACHED" {
-            self.completed_steps += 1;
             return Some(self.snapshot());
         }
 
@@ -69,14 +60,21 @@ impl ProgressParser {
             return None;
         }
 
-        // Look for [M/N] pattern in the description
+        // Look for a [M/N] or [stage M/N] pattern in the description
         if let Some(start) = description.find('[') {
             if let Some(end) = description[start..].find(']') {
                 let bracket_content = &description[start + 1..start + end];
-                if let Some((m_str, n_str)) = bracket_content.split_once('/') {
+                // BuildKit prefixes the counter with the stage name whenever a
+                // Dockerfile has more than one stage: `[builder 2/5]`.
+                let (stage, counter) = match bracket_content.rsplit_once(' ') {
+                    Some((stage, counter)) => (Some(stage.trim()), counter),
+                    None => (None, bracket_content),
+                };
+                if let Some((m_str, n_str)) = counter.split_once('/') {
                     if let (Ok(m), Ok(n)) =
                         (m_str.trim().parse::<u32>(), n_str.trim().parse::<u32>())
                     {
+                        self.current_stage = stage.filter(|s| !s.is_empty()).map(str::to_string);
                         // Update total if this stage has more steps
                         if n > self.total_user_steps {
                             self.total_user_steps = n;
@@ -107,6 +105,7 @@ impl ProgressParser {
             current_step: self.current_user_step,
             total_steps: self.total_user_steps,
             step_description: self.current_description.clone(),
+            stage: self.current_stage.clone(),
         }
     }
 }
@@ -193,19 +192,70 @@ mod tests {
 
     #[test]
     fn test_step_with_stage_name() {
+        // BuildKit prefixes the counter with the stage name for any Dockerfile
+        // with more than one stage: `#4 [builder 2/5] RUN ...`.
         let mut p = ProgressParser::new();
-        // BuildKit sometimes shows: #4 [builder 2/5] RUN ...
-        // The bracket content is "builder 2/5" — "builder 2" / "5"
-        // "builder 2" won't parse as u32, so no [M/N] match — returns None
-        assert!(p.parse_line("#4 [builder 2/5] RUN go build .").is_none());
+        let r = p.parse_line("#4 [builder 2/5] RUN go build .").unwrap();
+        assert_eq!(r.current_step, 2);
+        assert_eq!(r.total_steps, 5);
+        assert_eq!(r.step_description, "RUN go build .");
+        assert_eq!(r.stage.as_deref(), Some("builder"));
+    }
+
+    #[test]
+    fn test_stage_name_containing_digits() {
+        let mut p = ProgressParser::new();
+        let r = p.parse_line("#7 [go1-22 3/9] RUN make").unwrap();
+        assert_eq!(r.current_step, 3);
+        assert_eq!(r.total_steps, 9);
+        assert_eq!(r.stage.as_deref(), Some("go1-22"));
+    }
+
+    #[test]
+    fn test_multi_platform_stage_prefix() {
+        // BuildKit prefixes the platform on multi-platform builds, so the
+        // bracket holds TWO spaces: `[linux/arm64 builder 3/8]`. Splitting on
+        // the first space instead of the last silently kills all progress
+        // reporting for every multi-platform build.
+        let mut p = ProgressParser::new();
+        let r = p
+            .parse_line("#12 [linux/arm64 builder 3/8] RUN make")
+            .unwrap();
+        assert_eq!(r.current_step, 3);
+        assert_eq!(r.total_steps, 8);
+        assert_eq!(r.stage.as_deref(), Some("linux/arm64 builder"));
+        assert_eq!(r.step_description, "RUN make");
+    }
+
+    #[test]
+    fn test_default_stage_name() {
+        let mut p = ProgressParser::new();
+        let r = p.parse_line("#5 [stage-1 2/5] RUN apt-get update").unwrap();
+        assert_eq!(r.current_step, 2);
+        assert_eq!(r.total_steps, 5);
+        assert_eq!(r.stage.as_deref(), Some("stage-1"));
+    }
+
+    #[test]
+    fn test_unnamed_stage_has_no_stage_label() {
+        let mut p = ProgressParser::new();
+        let r = p.parse_line("#4 [2/5] RUN go build .").unwrap();
+        assert_eq!(r.current_step, 2);
+        assert_eq!(r.stage, None);
+    }
+
+    #[test]
+    fn test_internal_bracket_is_not_a_step_counter() {
+        let mut p = ProgressParser::new();
+        assert!(p
+            .parse_line("#1 [internal] load build definition from Dockerfile")
+            .is_none());
     }
 
     #[test]
     fn test_step_with_stage_name_space() {
         let mut p = ProgressParser::new();
-        // Actually BuildKit format for named stages is: [stage-name M/N]
-        // e.g. [builder 2/5] — note "builder 2" before "/" won't parse
-        // The real format uses "stage" prefix separated: we handle this gracefully
+        // The unprefixed form, emitted for single-stage Dockerfiles.
         let r = p.parse_line("#4 [2/5] RUN go build .").unwrap();
         assert_eq!(r.current_step, 2);
         assert_eq!(r.total_steps, 5);

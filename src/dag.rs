@@ -16,15 +16,21 @@ pub struct DagQueue {
     completed: HashSet<String>,
     /// Failed
     failed: HashSet<String>,
+    /// Cancelled — terminal, but NOT a failure, so dependents are not told a
+    /// dependency failed when the user simply pressed Ctrl+C.
+    cancelled: HashSet<String>,
     /// All target names
     all: HashSet<String>,
     /// Per-target required platforms (empty = any node can build it)
     target_platforms: HashMap<String, Vec<String>>,
+    /// Platform lists of the nodes that will run builds. Empty when unknown,
+    /// in which case every ready target is assumed claimable.
+    node_platforms: Vec<Vec<String>>,
 }
 
 /// Normalize a platform string for comparison.
 /// "linux/amd64", "linux/amd64/v2" etc. We compare the base arch.
-fn platform_base(p: &str) -> &str {
+pub fn platform_base(p: &str) -> &str {
     // "linux/amd64/v2" → "linux/amd64", "linux/arm64" → "linux/arm64"
     match p.find('/') {
         Some(first_slash) => {
@@ -38,6 +44,19 @@ fn platform_base(p: &str) -> &str {
     }
 }
 
+/// Whether a requested platform is satisfied by one a node reports.
+///
+/// When both sides name a variant they must match exactly — `linux/arm/v7` is
+/// not `linux/arm/v6`. When either side omits the variant it is treated as
+/// unspecific, so `linux/arm64` is satisfied by `linux/arm64/v8`.
+pub fn platform_matches(wanted: &str, available: &str) -> bool {
+    let has_variant = |p: &str| p.split('/').count() > 2;
+    if has_variant(wanted) && has_variant(available) {
+        return wanted == available;
+    }
+    platform_base(wanted) == platform_base(available)
+}
+
 /// Check if a node's platform list can build a target's required platforms.
 /// A node is compatible if it supports at least one of the target's platforms.
 fn platforms_compatible(node_platforms: &[String], target_platforms: &[String]) -> bool {
@@ -45,11 +64,9 @@ fn platforms_compatible(node_platforms: &[String], target_platforms: &[String]) 
         return true; // No platform constraint — any node works
     }
 
-    let node_bases: HashSet<&str> = node_platforms.iter().map(|p| platform_base(p)).collect();
-
     target_platforms
         .iter()
-        .any(|tp| node_bases.contains(platform_base(tp)))
+        .any(|tp| node_platforms.iter().any(|np| platform_matches(tp, np)))
 }
 
 impl DagQueue {
@@ -113,9 +130,76 @@ impl DagQueue {
             in_flight: HashSet::new(),
             completed: HashSet::new(),
             failed: HashSet::new(),
+            cancelled: HashSet::new(),
             all,
             target_platforms,
+            node_platforms: Vec::new(),
         }
+    }
+
+    /// Tell the queue which nodes exist, so it can tell "waiting for a build"
+    /// apart from "no node can ever claim what is left".
+    pub fn with_nodes(mut self, node_platforms: Vec<Vec<String>>) -> Self {
+        self.node_platforms = node_platforms;
+        self
+    }
+
+    /// Targets whose platform constraints no known node can satisfy.
+    ///
+    /// Returned as (target, required platforms) so the caller can explain the
+    /// problem instead of parking forever waiting for a build that cannot start.
+    pub fn unsatisfiable_targets(&self) -> Vec<(String, Vec<String>)> {
+        if self.node_platforms.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, Vec<String>)> = self
+            .all
+            .iter()
+            .filter_map(|t| {
+                let required = self.target_platforms.get(t)?;
+                if required.is_empty() || self.claimable_by_any_node(t) {
+                    None
+                } else {
+                    Some((t.clone(), required.clone()))
+                }
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn claimable_by_any_node(&self, target: &str) -> bool {
+        if self.node_platforms.is_empty() {
+            return true; // nodes unknown — assume claimable
+        }
+        let required = self
+            .target_platforms
+            .get(target)
+            .cloned()
+            .unwrap_or_default();
+        self.node_platforms
+            .iter()
+            .any(|np| platforms_compatible(np, &required))
+    }
+
+    /// Every target that has not reached a terminal state.
+    ///
+    /// Used on shutdown so cancelled and blocked targets are reported rather
+    /// than left `Pending`, which would stall any consumer waiting for the run
+    /// to complete.
+    pub fn unfinished_targets(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .all
+            .iter()
+            .filter(|t| {
+                !self.completed.contains(*t)
+                    && !self.failed.contains(*t)
+                    && !self.cancelled.contains(*t)
+            })
+            .cloned()
+            .collect();
+        out.sort();
+        out
     }
 
     /// Claim the next ready target that is compatible with the given node platforms.
@@ -146,14 +230,32 @@ impl DagQueue {
         self.failed.insert(target.to_string());
     }
 
-    /// Check if all targets are either completed or failed.
-    pub fn is_done(&self) -> bool {
-        self.completed.len() + self.failed.len() == self.all.len()
+    /// Mark a target as cancelled: terminal, but not a failure.
+    ///
+    /// Kept separate from `fail` so a dependent is not told its dependency
+    /// failed when the run was merely interrupted.
+    pub fn cancel(&mut self, target: &str) {
+        self.in_flight.remove(target);
+        self.cancelled.insert(target.to_string());
     }
 
-    /// Check if there's no more work possible (nothing ready, nothing in flight).
+    /// Check if all targets are either completed or failed.
+    pub fn is_done(&self) -> bool {
+        self.completed.len() + self.failed.len() + self.cancelled.len() == self.all.len()
+    }
+
+    /// Check if no further progress is possible.
+    ///
+    /// A ready target that no node can claim counts as stalled: otherwise every
+    /// worker parks waiting for a completion notification that can never come.
     pub fn is_stalled(&self) -> bool {
-        self.ready.is_empty() && self.in_flight.is_empty() && !self.is_done()
+        if self.is_done() || !self.in_flight.is_empty() {
+            return false;
+        }
+        if self.ready.is_empty() {
+            return true;
+        }
+        !self.ready.iter().any(|t| self.claimable_by_any_node(t))
     }
 
     /// Get the required platforms for a target (empty if unconstrained).
@@ -170,18 +272,34 @@ impl DagQueue {
         self.ready.len()
     }
 
-    /// Targets that are blocked because a dependency failed.
-    pub fn blocked_targets(&self) -> Vec<String> {
-        self.all
-            .iter()
-            .filter(|t| {
-                !self.completed.contains(*t)
-                    && !self.failed.contains(*t)
-                    && !self.in_flight.contains(*t)
-                    && !self.ready.iter().any(|r| r == *t)
-            })
-            .cloned()
-            .collect()
+    /// Dependencies of `target` that failed, transitively.
+    ///
+    /// Distinguishes "blocked by a failed dependency" from "never started",
+    /// which the user needs in order to know where to look.
+    pub fn failed_dependencies(&self, target: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stack = vec![target.to_string()];
+
+        while let Some(t) = stack.pop() {
+            let Some(deps) = self.deps.get(&t) else {
+                continue;
+            };
+            for dep in deps {
+                if !seen.insert(dep.clone()) {
+                    continue;
+                }
+                if self.failed.contains(dep) {
+                    out.push(dep.clone());
+                } else if !self.completed.contains(dep) && !self.cancelled.contains(dep) {
+                    stack.push(dep.clone());
+                }
+            }
+        }
+
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Detect cycles in the dependency graph using DFS.
@@ -353,7 +471,10 @@ mod tests {
         q.fail("a");
         assert_eq!(q.ready_count(), 0);
         assert!(q.is_stalled());
-        assert_eq!(q.blocked_targets().len(), 2);
+        assert_eq!(
+            q.unfinished_targets(),
+            vec!["b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
@@ -481,7 +602,8 @@ mod tests {
         // d should NOT be ready (b failed)
         assert!(q.claim_for_platforms(&any).is_none());
         assert!(!q.is_done());
-        assert!(q.blocked_targets().contains(&"d".to_string()));
+        assert!(q.unfinished_targets().contains(&"d".to_string()));
+        assert_eq!(q.failed_dependencies("d"), vec!["b".to_string()]);
     }
 
     #[test]
@@ -500,6 +622,22 @@ mod tests {
     }
 
     #[test]
+    fn explicit_variants_must_match_exactly() {
+        // Asking for arm/v7 and being handed an arm/v6 builder is a silent
+        // substitution of something the user explicitly did not ask for.
+        assert!(!super::platform_matches("linux/arm/v7", "linux/arm/v6"));
+        assert!(super::platform_matches("linux/arm/v7", "linux/arm/v7"));
+    }
+
+    #[test]
+    fn an_unspecified_variant_matches_any() {
+        assert!(super::platform_matches("linux/arm64", "linux/arm64/v8"));
+        assert!(super::platform_matches("linux/amd64/v3", "linux/amd64"));
+        assert!(super::platform_matches("linux/amd64", "linux/amd64"));
+        assert!(!super::platform_matches("linux/amd64", "linux/arm64"));
+    }
+
+    #[test]
     fn test_platform_base_edge_cases() {
         assert_eq!(super::platform_base(""), "");
         assert_eq!(super::platform_base("linux"), "linux");
@@ -507,6 +645,167 @@ mod tests {
         assert_eq!(super::platform_base("linux/amd64/v2"), "linux/amd64");
         assert_eq!(super::platform_base("linux/arm/v7/extra"), "linux/arm");
         assert_eq!(super::platform_base("/amd64"), "/amd64");
+    }
+
+    #[test]
+    fn unclaimable_target_is_stalled_not_a_deadlock() {
+        // #2: an amd-only fleet with an arm-only target used to leave every
+        // worker parked on notified.await forever.
+        let targets = vec!["a".into(), "arm_only".into()];
+        let platforms = HashMap::from([("arm_only".to_string(), vec!["linux/arm64".to_string()])]);
+        let mut q = DagQueue::new(targets, HashMap::new(), platforms)
+            .with_nodes(vec![vec!["linux/amd64".to_string()]]);
+
+        let amd = vec!["linux/amd64".to_string()];
+        let t = q.claim_for_platforms(&amd).unwrap();
+        q.complete(&t);
+
+        assert!(q.claim_for_platforms(&amd).is_none());
+        assert!(!q.is_done());
+        assert!(q.is_stalled(), "worker must be able to exit its loop");
+    }
+
+    #[test]
+    fn unsatisfiable_targets_are_reported_with_their_platforms() {
+        let targets = vec!["a".into(), "arm_only".into()];
+        let platforms = HashMap::from([("arm_only".to_string(), vec!["linux/arm64".to_string()])]);
+        let q = DagQueue::new(targets, HashMap::new(), platforms)
+            .with_nodes(vec![vec!["linux/amd64".to_string()]]);
+
+        assert_eq!(
+            q.unsatisfiable_targets(),
+            vec![("arm_only".to_string(), vec!["linux/arm64".to_string()])]
+        );
+    }
+
+    #[test]
+    fn multi_arch_node_satisfies_everything() {
+        let targets = vec!["arm".into(), "amd".into()];
+        let platforms = HashMap::from([
+            ("arm".to_string(), vec!["linux/arm64".to_string()]),
+            ("amd".to_string(), vec!["linux/amd64".to_string()]),
+        ]);
+        let q = DagQueue::new(targets, HashMap::new(), platforms).with_nodes(vec![vec![
+            "linux/amd64".to_string(),
+            "linux/arm64".to_string(),
+        ]]);
+        assert!(q.unsatisfiable_targets().is_empty());
+        assert!(!q.is_stalled());
+    }
+
+    #[test]
+    fn without_node_information_nothing_is_unsatisfiable() {
+        // Absent node data we must not guess: a target we cannot evaluate is
+        // never reported unbuildable, and the queue never declares itself
+        // stalled on it (which is what would resurrect the original hang).
+        let targets = vec!["arm".into(), "amd".into()];
+        let platforms = HashMap::from([
+            ("arm".to_string(), vec!["linux/arm64".to_string()]),
+            ("amd".to_string(), vec!["linux/amd64".to_string()]),
+        ]);
+        let q = DagQueue::new(targets, HashMap::new(), platforms);
+
+        assert!(q.unsatisfiable_targets().is_empty());
+        assert!(!q.is_stalled(), "ready work must not look stalled");
+        // And with node data, the same fixture DOES report one.
+        let q = q.with_nodes(vec![vec!["linux/amd64".to_string()]]);
+        assert_eq!(
+            q.unsatisfiable_targets(),
+            vec![("arm".to_string(), vec!["linux/arm64".to_string()])]
+        );
+    }
+
+    #[test]
+    fn in_flight_work_is_never_stalled() {
+        let mut q = DagQueue::new(vec!["a".into(), "b".into()], HashMap::new(), no_platforms())
+            .with_nodes(vec![vec!["linux/amd64".to_string()]]);
+        let amd = vec!["linux/amd64".to_string()];
+        q.claim_for_platforms(&amd).unwrap();
+        q.claim_for_platforms(&amd).unwrap();
+        assert!(!q.is_stalled());
+    }
+
+    #[test]
+    fn unfinished_targets_covers_pending_and_blocked() {
+        // #4: after cancellation, un-started targets must still be reportable.
+        let deps = HashMap::from([("b".to_string(), vec!["a".to_string()])]);
+        let mut q = DagQueue::new(
+            vec!["a".into(), "b".into(), "c".into()],
+            deps,
+            no_platforms(),
+        );
+        let amd = vec!["linux/amd64".to_string()];
+        let t = q.claim_for_platforms(&amd).unwrap();
+        q.complete(&t);
+
+        let unfinished = q.unfinished_targets();
+        assert!(unfinished.contains(&"b".to_string()));
+        assert!(unfinished.contains(&"c".to_string()));
+        assert!(!unfinished.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn unfinished_targets_is_empty_when_everything_settled() {
+        let mut q = DagQueue::new(vec!["a".into(), "b".into()], HashMap::new(), no_platforms());
+        q.complete("a");
+        q.fail("b");
+        assert!(q.unfinished_targets().is_empty());
+        assert!(q.is_done());
+    }
+
+    #[test]
+    fn failed_dependencies_are_reported_transitively() {
+        let deps = HashMap::from([
+            ("b".to_string(), vec!["a".to_string()]),
+            ("c".to_string(), vec!["b".to_string()]),
+        ]);
+        let mut q = DagQueue::new(
+            vec!["a".into(), "b".into(), "c".into()],
+            deps,
+            no_platforms(),
+        );
+        let amd = vec!["linux/amd64".to_string()];
+        q.claim_for_platforms(&amd);
+        q.fail("a");
+
+        assert_eq!(q.failed_dependencies("b"), vec!["a".to_string()]);
+        // c is blocked by b, which is itself blocked by the failed a.
+        assert_eq!(q.failed_dependencies("c"), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn a_cancelled_dependency_is_not_reported_as_failed() {
+        // Ctrl+C must not tell the user a dependency FAILED.
+        let deps = HashMap::from([
+            ("b".to_string(), vec!["a".to_string()]),
+            ("d".to_string(), vec!["c".to_string()]),
+        ]);
+        let mut q = DagQueue::new(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            deps,
+            no_platforms(),
+        );
+        let amd = vec!["linux/amd64".to_string()];
+        q.claim_for_platforms(&amd);
+        q.claim_for_platforms(&amd);
+        q.cancel("a");
+        q.fail("c");
+
+        assert!(
+            q.failed_dependencies("b").is_empty(),
+            "a cancelled dependency is not a failure"
+        );
+        assert_eq!(q.failed_dependencies("d"), vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn cancelled_targets_are_terminal() {
+        let mut q = DagQueue::new(vec!["a".into(), "b".into()], HashMap::new(), no_platforms());
+        q.complete("a");
+        assert!(!q.is_done());
+        q.cancel("b");
+        assert!(q.is_done(), "cancelled targets must not keep the run open");
+        assert!(q.unfinished_targets().is_empty());
     }
 
     #[test]
