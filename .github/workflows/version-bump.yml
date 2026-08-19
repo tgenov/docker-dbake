@@ -1,47 +1,109 @@
 name: Version Bump
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
     branches: [master]
-    paths-ignore:
-      - ".github/**"
+    types: [completed]
 
 permissions:
   contents: write
 
+# Only one bump at a time. Note GitHub keeps a single pending run per group and
+# cancels any earlier pending one, so a burst of pushes yields one bump, not one
+# per push.
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
 jobs:
   bump:
     runs-on: ubuntu-latest
-    # Skip if the commit was made by this workflow (prevents infinite loop)
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    # Only bump when CI actually passed, so a release can never ship a commit
+    # whose tests failed. Skip the workflow's own bump commits.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      !contains(github.event.workflow_run.head_commit.message, '[skip ci]')
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: master
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get current version
-        id: current
+      # workflow_run cannot filter on paths, so do it here: a docs-only or
+      # workflow-only commit should not cut a release.
+      - name: Skip release-irrelevant commits
+        id: relevant
         run: |
-          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$version" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          sha='${{ github.event.workflow_run.head_sha }}'
+          if ! changed=$(git diff --name-only "${sha}^" "$sha" 2>/dev/null); then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"   # merge/root commit: be safe
+            exit 0
+          fi
+          if echo "$changed" | grep -qvE '^(README\.md|LICENSE.*|\.gitignore|\.github/|docs/|benchmark/)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No release-relevant changes in $sha; nothing to bump."
+          fi
+
+      # Only bump the commit CI actually tested. If master has moved on, that
+      # newer commit gets its own CI run and its own bump.
+      - name: Verify master is the commit CI tested
+        if: steps.relevant.outputs.relevant == 'true'
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          tested='${{ github.event.workflow_run.head_sha }}'
+          if [ "$head" != "$tested" ]; then
+            echo "master ($head) has moved past the tested commit ($tested); skipping."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Bump patch version
         id: bump
+        if: steps.relevant.outputs.relevant == 'true'
         run: |
-          IFS='.' read -r major minor patch <<< "${{ steps.current.outputs.version }}"
-          new_patch=$((patch + 1))
-          new_version="${major}.${minor}.${new_patch}"
-          echo "version=$new_version" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          git fetch --tags --force
+          current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # A tag can be ahead of Cargo.toml (e.g. a reverted manual bump), and
+          # re-creating an existing tag is a hard failure. Bump from whichever
+          # is higher.
+          latest=$(git tag -l 'v*' | sed 's/^v//' | sort -V | tail -1)
+          latest=${latest:-0.0.0}
+          base=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)
 
-          # Update Cargo.toml
-          sed -i "s/^version = \"${{ steps.current.outputs.version }}\"/version = \"${new_version}\"/" Cargo.toml
+          IFS='.' read -r major minor patch <<< "$base"
+          new_version="${major}.${minor}.$((patch + 1))"
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$new_version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml=$current latest-tag=$latest -> $new_version"
+
+          sed -i "s/^version = \"${current}\"/version = \"${new_version}\"/" Cargo.toml
+          # Refresh only this crate's entry in the lockfile. Dependency versions
+          # are untouched; without this, every --locked build after a bump fails
+          # on a stale version entry.
+          cargo update --workspace
 
       - name: Commit and tag
+        if: steps.relevant.outputs.relevant == 'true'
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml
-          git commit -m "bump version to v${{ steps.bump.outputs.version }} [skip ci]"
-          git tag "v${{ steps.bump.outputs.version }}"
-          git push origin master --tags
+          git add Cargo.toml Cargo.lock
+          git commit -m "bump version to ${{ steps.bump.outputs.tag }} [skip ci]"
+          # Annotated, not lightweight: `git push --follow-tags` silently ignores
+          # lightweight tags, which would leave every release pinned to the last
+          # tag that was pushed.
+          git tag -a "${{ steps.bump.outputs.tag }}" -m "${{ steps.bump.outputs.tag }}"
+          # Deliberately no rebase: if master moved, this push fails and a newer
+          # commit gets its own CI run and its own bump. Rebasing would put the
+          # release tag on a commit CI never tested.
+          git push origin master --follow-tags

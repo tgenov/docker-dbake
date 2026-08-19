@@ -9,9 +9,50 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    # Only run if version-bump succeeded (not on skip or failure)
+  # Resolve the tag exactly once. Every other job checks out that ref, so a
+  # commit landing mid-run cannot make the build jobs and the release job
+  # disagree about which version they are publishing.
+  prepare:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      fresh: ${{ steps.tag.outputs.fresh }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          tag=$(git describe --tags --abbrev=0)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Belt and braces: never overwrite the assets of a release that
+          # already exists, whatever caused this workflow to fire.
+          set +e
+          gh release view "$tag" >/dev/null 2>&1
+          status=$?
+          set -e
+          case "$status" in
+            0)
+              echo "fresh=false" >> "$GITHUB_OUTPUT"
+              echo "$tag is already released; nothing to do." ;;
+            1)
+              echo "fresh=true" >> "$GITHUB_OUTPUT"
+              echo "Releasing $tag" ;;
+            *)
+              # Anything else is an API problem, not proof the release is
+              # absent. Refuse rather than risk overwriting a real release.
+              echo "gh release view failed with status $status; refusing to publish."
+              exit 1 ;;
+          esac
+
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.fresh == 'true' }}
     strategy:
       matrix:
         include:
@@ -32,15 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Get latest tag
-        id: tag
-        run: |
-          git fetch --tags
-          tag=$(git describe --tags --abbrev=0)
-          echo "tag=$tag" >> $GITHUB_OUTPUT
-          echo "Building release for $tag"
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -57,7 +90,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }}
+      # --locked so every platform's binary is built from the same dependency
+      # tree that CI tested.
+      - run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
@@ -70,19 +105,13 @@ jobs:
           path: ${{ matrix.name }}
 
   release:
-    needs: build
+    needs: [prepare, build]
+    if: ${{ needs.prepare.outputs.fresh == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Get latest tag
-        id: tag
-        run: |
-          git fetch --tags
-          tag=$(git describe --tags --abbrev=0)
-          echo "tag=$tag" >> $GITHUB_OUTPUT
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -91,6 +120,6 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
           generate_release_notes: true
           files: docker-dbake-*

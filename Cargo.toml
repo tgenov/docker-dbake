@@ -3,6 +3,11 @@ name = "docker-dbake"
 version = "0.1.5"
 edition = "2021"
 description = "Distributed Docker Bake — work-stealing across buildkitd nodes"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tgenov/docker-dbake"
+readme = "README.md"
+keywords = ["docker", "buildkit", "buildx", "bake", "distributed"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
 
 [[bin]]
 name = "docker-dbake"
@@ -13,9 +18,12 @@ tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 anyhow = "1"
 thiserror = "2"
 ratatui = "0.30"
 crossterm = "0.29"
 tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

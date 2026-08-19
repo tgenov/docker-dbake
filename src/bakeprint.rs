@@ -40,11 +40,45 @@ pub enum CacheEntry {
 }
 
 impl CacheEntry {
+    /// Render the entry the way `docker buildx --set target.cache-from=` expects:
+    /// comma-separated `key=value` pairs, `type` first.
+    ///
+    /// buildx serialises cache entries as JSON objects in `--print` output, so
+    /// the object form must be flattened — passing the JSON through verbatim
+    /// makes buildx fail with `bare " in non-quoted-field`.
     pub fn to_arg(&self) -> String {
         match self {
             CacheEntry::String(s) => s.clone(),
-            CacheEntry::Object(v) => v.to_string(),
+            CacheEntry::Object(v) => flatten_cache_object(v),
         }
+    }
+}
+
+fn flatten_cache_object(v: &serde_json::Value) -> String {
+    let Some(map) = v.as_object() else {
+        // Not an object (buildx should never emit this) — fall back to the
+        // scalar rendering, which is at least CSV-safe for strings and numbers.
+        return scalar_to_string(v);
+    };
+
+    let mut parts = Vec::with_capacity(map.len());
+    if let Some(ty) = map.get("type") {
+        parts.push(format!("type={}", scalar_to_string(ty)));
+    }
+    for (k, val) in map {
+        if k == "type" {
+            continue;
+        }
+        parts.push(format!("{}={}", k, scalar_to_string(val)));
+    }
+    parts.join(",")
+}
+
+/// Render a JSON scalar without JSON quoting, which `--set` cannot parse.
+fn scalar_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -70,17 +104,90 @@ pub struct BakeGroup {
 /// Run `docker buildx bake --print` and parse the JSON output.
 /// This is the canonical source of truth for targets — works for both
 /// HCL bake files and docker-compose YAML.
-pub fn bake_print(file: &std::path::Path, builder: &str) -> Result<BakePrint> {
-    let output = Command::new("docker")
-        .args([
-            "buildx",
-            "bake",
-            "--builder",
-            builder,
-            "-f",
-            &file.to_string_lossy(),
-            "--print",
-        ])
+pub fn bake_print(file: &std::path::Path, builder: &str, targets: &[String]) -> Result<BakePrint> {
+    bake_print_with(targets, |t| run_bake_print(file, builder, t), file)
+}
+
+/// Target-resolution policy, separated from the subprocess so it can be tested.
+///
+/// Without target arguments buildx resolves the implicit `default` group. That
+/// group may be missing entirely (HCL files need not define one) or may cover
+/// only some targets, so a target-less print is not sufficient on its own.
+fn bake_print_with(
+    targets: &[String],
+    mut run: impl FnMut(&[String]) -> Result<BakePrint>,
+    file: &std::path::Path,
+) -> Result<BakePrint> {
+    let full = run(&[]);
+
+    match full {
+        // The default group covers everything asked for.
+        Ok(print) if covers(&print, targets) => Ok(print),
+        // Either the default group is missing, or it does not include every
+        // requested target. Ask buildx for exactly what we want.
+        _ if !targets.is_empty() => {
+            let retry = run(targets);
+            match (retry, full) {
+                (Ok(print), _) => Ok(print),
+                (Err(retry_err), Err(first)) => {
+                    Err(retry_err.context(format!("target-less print also failed: {:#}", first)))
+                }
+                // The retry failed but the default group resolved fine. Usually
+                // that means one of the names is not a buildable target — a
+                // typo, or a compose service with no `build:` pulled in by
+                // depends_on — so keep the usable result and let target
+                // selection produce a good message. Surface the discarded error
+                // regardless: the retry can also fail for unrelated reasons
+                // (registry auth, a bad context) that the user needs to see.
+                (Err(retry_err), Ok(print)) => {
+                    eprintln!(
+                        "warning: buildx could not resolve [{}] directly ({:#}); \
+                         continuing with the targets it did resolve",
+                        targets.join(", "),
+                        retry_err
+                    );
+                    Ok(print)
+                }
+            }
+        }
+        // No targets requested and the default group is missing entirely.
+        Err(first) => Err(first.context(no_default_group_hint(file))),
+        // Unreachable: `covers` is vacuously true for an empty target list, so
+        // arm A already matched. Kept for exhaustiveness.
+        Ok(print) => Ok(print),
+    }
+}
+
+/// Whether a print result contains every requested target.
+fn covers(print: &BakePrint, targets: &[String]) -> bool {
+    targets.iter().all(|t| print.target.contains_key(t))
+}
+
+/// Guidance for the most common reason a target-less `--print` fails.
+fn no_default_group_hint(file: &std::path::Path) -> String {
+    format!(
+        "{} defines no `default` group and no targets were given.\n\
+         Either add `group \"default\" {{ targets = [...] }}` to the file, or name \
+         the targets to build: docker dbake -f {} <target>...",
+        file.display(),
+        file.display()
+    )
+}
+
+fn run_bake_print(file: &std::path::Path, builder: &str, targets: &[String]) -> Result<BakePrint> {
+    let mut cmd = Command::new("docker");
+    cmd.args([
+        "buildx",
+        "bake",
+        "--builder",
+        builder,
+        "-f",
+        &file.to_string_lossy(),
+        "--print",
+    ]);
+    cmd.args(targets);
+
+    let output = cmd
         .output()
         .context("failed to run `docker buildx bake --print`")?;
 
@@ -89,10 +196,7 @@ pub fn bake_print(file: &std::path::Path, builder: &str) -> Result<BakePrint> {
         bail!("docker buildx bake --print failed: {}", stderr.trim());
     }
 
-    let print: BakePrint =
-        serde_json::from_slice(&output.stdout).context("failed to parse bake --print JSON")?;
-
-    Ok(print)
+    serde_json::from_slice(&output.stdout).context("failed to parse bake --print JSON")
 }
 
 /// Extract depends_on edges from the bake file by re-parsing it ourselves.
@@ -230,7 +334,7 @@ fn parse_yaml_depends_on(content: &str) -> Result<HashMap<String, Vec<String>>> 
     }
 
     let compose: ComposeFile =
-        serde_yaml::from_str(content).context("failed to parse compose YAML for depends_on")?;
+        serde_yaml_ng::from_str(content).context("failed to parse compose YAML for depends_on")?;
 
     let mut deps = HashMap::new();
     for (name, svc) in compose.services {
@@ -317,6 +421,188 @@ fn parse_hcl_string_list(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn print_with(names: &[&str]) -> BakePrint {
+        let targets: String = names
+            .iter()
+            .map(|n| format!("\"{}\": {{}}", n))
+            .collect::<Vec<_>>()
+            .join(",");
+        serde_json::from_str(&format!("{{\"target\": {{{}}}}}", targets)).unwrap()
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn uses_the_default_group_when_it_covers_everything() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let out = bake_print_with(
+            &names(&["app"]),
+            |t| {
+                calls.push(t.to_vec());
+                Ok(print_with(&["app", "other"]))
+            },
+            std::path::Path::new("x.hcl"),
+        )
+        .unwrap();
+        assert_eq!(out.target.len(), 2);
+        assert_eq!(
+            calls,
+            vec![Vec::<String>::new()],
+            "must not retry needlessly"
+        );
+    }
+
+    #[test]
+    fn retries_with_targets_when_there_is_no_default_group() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let out = bake_print_with(
+            &names(&["app"]),
+            |t| {
+                calls.push(t.to_vec());
+                if t.is_empty() {
+                    bail!("failed to find target default")
+                }
+                Ok(print_with(&["app"]))
+            },
+            std::path::Path::new("x.hcl"),
+        )
+        .unwrap();
+        assert!(out.target.contains_key("app"));
+        assert_eq!(calls, vec![vec![], names(&["app"])]);
+    }
+
+    #[test]
+    fn retries_when_the_default_group_is_only_partial() {
+        // `group "default" { targets = ["app"] }` plus a separate target
+        // "extra": the target-less print returns only `app`, so asking for
+        // `extra` must not be reported as an unknown target.
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let out = bake_print_with(
+            &names(&["extra"]),
+            |t| {
+                calls.push(t.to_vec());
+                if t.is_empty() {
+                    Ok(print_with(&["app"]))
+                } else {
+                    Ok(print_with(&["extra"]))
+                }
+            },
+            std::path::Path::new("x.hcl"),
+        )
+        .unwrap();
+        assert!(out.target.contains_key("extra"));
+        assert_eq!(calls.len(), 2, "partial default group must trigger a retry");
+    }
+
+    #[test]
+    fn an_unknown_target_falls_back_to_the_usable_full_print() {
+        // buildx cannot resolve the name, but the default group did resolve.
+        // Returning that lets target selection produce "unknown target 'nope' /
+        // did you mean ...", which is far more useful than buildx's message.
+        let out = bake_print_with(
+            &names(&["nope"]),
+            |t| {
+                if t.is_empty() {
+                    Ok(print_with(&["app"]))
+                } else {
+                    bail!("failed to find target nope")
+                }
+            },
+            std::path::Path::new("x.hcl"),
+        )
+        .unwrap();
+        assert_eq!(out.target.len(), 1);
+        assert!(out.target.contains_key("app"));
+    }
+
+    #[test]
+    fn a_non_buildable_compose_dependency_does_not_abort_the_run() {
+        // `app depends_on db` where db has no build section: --with-deps adds
+        // `db` to the wanted list, buildx rejects it, and the run must still
+        // build `app` rather than dying.
+        let out = bake_print_with(
+            &names(&["app", "db"]),
+            |t| {
+                if t.is_empty() {
+                    Ok(print_with(&["app"]))
+                } else {
+                    bail!("failed to find target db")
+                }
+            },
+            std::path::Path::new("docker-compose.yml"),
+        )
+        .unwrap();
+        assert!(out.target.contains_key("app"));
+    }
+
+    #[test]
+    fn both_prints_failing_reports_both_errors() {
+        let err = bake_print_with(
+            &names(&["app"]),
+            |_| bail!("boom"),
+            std::path::Path::new("x.hcl"),
+        )
+        .unwrap_err();
+        assert!(format!("{:#}", err).contains("target-less print also failed"));
+    }
+
+    #[test]
+    fn no_targets_and_no_default_group_explains_how_to_recover() {
+        let err = bake_print_with(
+            &[],
+            |_| bail!("failed to find target default"),
+            std::path::Path::new("docker-bake.hcl"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{:#}", err).contains("no `default` group"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn hint_explains_how_to_recover_from_a_missing_default_group() {
+        let hint = no_default_group_hint(std::path::Path::new("docker-bake.hcl"));
+        assert!(hint.contains("no `default` group"), "{hint}");
+        assert!(
+            hint.contains("docker dbake -f docker-bake.hcl <target>"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn cache_entry_string_is_passed_through() {
+        let e = CacheEntry::String("type=registry,ref=foo/bar".into());
+        assert_eq!(e.to_arg(), "type=registry,ref=foo/bar");
+    }
+
+    #[test]
+    fn cache_entry_object_is_flattened_to_csv_with_type_first() {
+        // buildx >= 0.17 emits cache entries as objects; --set wants CSV k=v.
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"src":"/tmp/c1","type":"local"}"#).unwrap();
+        assert_eq!(CacheEntry::Object(v).to_arg(), "type=local,src=/tmp/c1");
+    }
+
+    #[test]
+    fn cache_entry_object_handles_non_string_values() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"type":"registry","ref":"r/foo","oci-mediatypes":true}"#)
+                .unwrap();
+        let arg = CacheEntry::Object(v).to_arg();
+        assert!(arg.starts_with("type=registry"), "{arg}");
+        assert!(arg.contains("oci-mediatypes=true"), "{arg}");
+        assert!(!arg.contains('"'), "no JSON quoting may survive: {arg}");
+    }
+
+    #[test]
+    fn cache_entry_object_without_type_still_produces_csv() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"ref":"r/foo"}"#).unwrap();
+        assert_eq!(CacheEntry::Object(v).to_arg(), "ref=r/foo");
+    }
 
     #[test]
     fn test_parse_hcl_depends_on() {

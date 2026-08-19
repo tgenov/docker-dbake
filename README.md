@@ -77,7 +77,7 @@ There is no built-in way to:
 ```
 
 1. Discovers all running TCP nodes in your buildx builder
-2. Creates an ephemeral shard builder per node (`{builder}-shard-{node}`)
+2. Creates an ephemeral shard builder per node (`{builder}-shard-{node}--run{pid}`)
 3. Resolves targets from `docker buildx bake --print` (works with both compose YAML and HCL)
 4. Dispatches targets across nodes using work-stealing: each node builds one target at a time, then grabs the next available
 5. Fast nodes naturally get more work — no need to predict build sizes
@@ -112,10 +112,10 @@ docker dbake [OPTIONS] [TARGETS...]
 |------|---------|-------------|
 | `-f, --file <PATH>` | `docker-compose.yml` | Compose or HCL bake file |
 | `--builder <NAME>` | active builder | Buildx builder name |
-| `--profile <NAME>` | — | Build only services in this compose profile |
+| `--profile <NAME>` | — | Also build services gated behind this compose profile (repeatable) |
 | `--with-deps` | — | Include `depends_on` chain for specified targets |
 | `--exclude <A,B,C>` | — | Skip these targets (comma-separated) |
-| `--platform <PLATFORM>` | — | Constrain shard builder platform |
+| `--platform <PLATFORM>` | — | Restrict shards *and* scheduling to these platforms (comma-separated) |
 | `--cache-registry <URL>` | — | Registry for `type=registry` cache (`mode=max`) |
 | `--no-cache` | — | Pass `--no-cache` to each bake invocation |
 | `--load` | — | Load built images into local docker |
@@ -190,7 +190,7 @@ In non-TTY environments (CI, pipes), falls back to line-by-line output.
 Press `Enter` on any target to view its build log in real time — no need to exit the TUI or wait for the build to finish. This is especially useful for diagnosing failures while other builds are still running.
 
 ```
- mysql [node2] FAILED: bake failed for target mysql (log: /tmp/dbake-logs/mysql.log)
+ mysql [node2] FAILED: bake failed for target mysql (log: /tmp/dbake-logs/8123/mysql.log)
 ┌─────────────── Build Log ────────────────────────────────────────────────────┐
 │ #8 [stage-1 2/5] RUN apt-get update && apt-get install -y ...               │
 │ #8 ERROR: process "/bin/sh -c apt-get update" did not complete successfully │
@@ -226,10 +226,31 @@ Targets with platform constraints (e.g., `platform: linux/amd64`) are only dispa
 ### Failure handling
 
 When a target fails:
-- Its dependents (HCL only) are blocked and reported as skipped
-- With `--fail-fast`, all in-flight builds are cancelled
-- Build logs are saved to `$TMPDIR/dbake-logs/{target}.log`
+- Its dependents (HCL only) are blocked and reported as skipped, naming the dependency that failed
+- With `--fail-fast`, in-flight builds are killed — the `docker buildx bake` child processes are terminated, not just left to finish
+- Build logs are saved to `$TMPDIR/dbake-logs/{run-pid}/{target}.log` (the target name is sanitised for use as a filename)
 - You can inspect the log in the TUI without interrupting other builds
+
+Exit codes: `0` when every target built, `1` if any target failed or was
+skipped, `130` if the run was interrupted.
+
+`--platform` narrows each node to the platforms it actually reports, so a node
+that cannot honour the constraint is dropped with a warning rather than being
+handed work it cannot run.
+
+### Cancellation
+
+`Ctrl+C` cancels the run: in-flight builds are killed, remaining targets are reported as cancelled, and shard builders are removed. A second `Ctrl+C` exits immediately.
+
+### Platform constraints
+
+A target whose platform no node can satisfy is a startup error, not a hang:
+
+```
+error: no node in builder 'my-cluster' can build 1 target(s):
+  arm-app requires [linux/arm64]
+  available platforms: linux/amd64
+```
 
 ## Shared cache with a registry
 
@@ -273,7 +294,11 @@ Pass `--cache-registry` to enable shared caching:
 docker dbake --cache-registry 192.168.0.110:5000
 ```
 
-`dbake` appends per-target registry cache entries to each build. These are *additive* — they don't replace any `cache-from`/`cache-to` already defined in your bake file:
+`dbake` adds per-target registry cache entries to each build. A single
+`--set target.cache-from=` *replaces* the bake file's list rather than adding to
+it, so `dbake` re-emits your file's own entries alongside the registry one —
+repeated `--set` flags accumulate. The net effect is additive: nothing you
+declared is lost.
 
 ```
 cache-from: type=registry,ref=192.168.0.110:5000/buildcache/{target}
@@ -308,9 +333,9 @@ This is critical for distributed builds. Without it, distributing across N nodes
 
 Shard builders are ephemeral and fully managed:
 
-1. **Startup:** Stale shards from previous crashes are cleaned up
-2. **Creation:** One shard per running TCP node (`{builder}-shard-{node}`)
-3. **Cleanup:** RAII guard removes all shards on exit (normal, error, or Ctrl+C)
+1. **Startup:** Shards left behind by runs that are no longer alive are cleaned up. Shards belonging to a *running* `dbake` are left alone.
+2. **Creation:** One shard per running TCP node, named `{builder}-shard-{node}--run{pid}`. The run id keeps concurrent runs from clobbering each other.
+3. **Cleanup:** An RAII guard removes this run's shards on exit — success, failure, or Ctrl+C. (A second Ctrl+C exits immediately and leaves cleanup to the next run.)
 
 ## Builder setup
 
@@ -364,8 +389,11 @@ src/
 │   ├── inspect.rs       # Node discovery from docker buildx inspect
 │   ├── shard.rs         # Ephemeral shard builder lifecycle
 │   └── node.rs          # Node/ShardNode types
+├── selection.rs         # Target selection: profiles, --with-deps, --exclude
+├── logs.rs              # Per-run log directory and path sanitisation
 ├── executor/
-│   └── bake.rs          # Build execution and cache aggregation
+│   ├── bake.rs          # Build execution, cancellation and cache aggregation
+│   └── progress.rs      # BuildKit --progress plain parsing
 ├── scheduler/
 │   └── dispatcher.rs    # Work-stealing dispatcher
 ├── compose/
@@ -385,3 +413,12 @@ cargo build --release    # Release build
 make install             # Build + install as Docker CLI plugin
 make uninstall           # Remove from CLI plugins
 ```
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
