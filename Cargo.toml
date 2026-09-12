@@ -1,6 +1,6 @@
 [package]
 name = "docker-dbake"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Distributed Docker Bake — work-stealing across buildkitd nodes"
 license = "MIT OR Apache-2.0"
